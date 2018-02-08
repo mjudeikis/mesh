@@ -86,14 +86,8 @@ func (cm *connectionMaker) InitiateConnections(peers []string, replace bool) []e
 	errors := []error{}
 	addrs := peerAddrs{}
 	for _, peer := range peers {
-		host, port, err := net.SplitHostPort(peer)
+		addr, err := cm.getAddrFromDNS(peer)
 		if err != nil {
-			host = peer
-			port = "0" // we use that as an indication that "no port was supplied"
-		}
-		if host == "" || !isAlnum(port) {
-			errors = append(errors, fmt.Errorf("invalid peer name %q, should be host[:port]", peer))
-		} else if addr, err := net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%s", host, port)); err != nil {
 			errors = append(errors, err)
 		} else {
 			addrs[peer] = addr
@@ -234,6 +228,11 @@ func (cm *connectionMaker) queryLoop(actionChan <-chan connectionMakerAction) {
 	}
 }
 
+func (cm *connectionMaker) sleepAndRefresh() {
+	time.Sleep(initialInterval)
+	cm.refresh()
+}
+
 func (cm *connectionMaker) completeAddr(addr net.TCPAddr) string {
 	if addr.Port == 0 {
 		addr.Port = cm.port
@@ -262,8 +261,16 @@ func (cm *connectionMaker) checkStateAndAttemptConnections() time.Duration {
 	}
 
 	// Add direct targets that are not connected
-	for _, addr := range cm.directPeers {
+	for key, addr := range cm.directPeers {
 		attempt := true
+		var err error
+		addr, err = cm.getAddrFromDNS(key)
+		if err != nil {
+			//if peer failed we need reconnect. But if service discovery still refreshing DNS record, we need to try few times
+			cm.logger.Printf("Failed to get IP address. Retring. Error: %s", err)
+			cm.sleepAndRefresh()
+			break
+		}
 		if addr.Port == 0 {
 			// If a peer was specified w/o a port, then we do not
 			// attempt to connect to it if we have any inbound
@@ -396,4 +403,23 @@ func (t *target) nextTryLater() {
 	if t.tryInterval > maxInterval {
 		t.tryInterval = maxInterval
 	}
+}
+
+// retrieved IP address if DNS is being used for peers
+func (cm *connectionMaker) getAddrFromDNS(peer string) (*net.TCPAddr, error) {
+	var errors error
+	var addr *net.TCPAddr
+	host, port, err := net.SplitHostPort(peer)
+	if err != nil {
+		host = peer
+		port = "0" // we use that as an indication that "no port was supplied"
+	}
+	if host == "" || !isAlnum(port) {
+		errors = fmt.Errorf("invalid peer name %q, should be host[:port]", peer)
+	} else if addr, err = net.ResolveTCPAddr("tcp4", fmt.Sprintf("%s:%s", host, port)); err != nil {
+		errors = err
+	} else {
+		return addr, errors
+	}
+	return nil, errors
 }
